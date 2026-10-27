@@ -1,0 +1,622 @@
+# ============================================================================
+# Project: Drug-Associated Cardiac Arrest & Guideline Utilization before WLST
+# Description: Data Analysis
+# Date: 22 Mar 2026 to 04 Aug 2026
+# Data Cleaned using Claude Sonnet 5.5 [24 Oct 2026]
+# ============================================================================
+
+# ---- SETUP ---------------------------------------------------------------
+
+install.packages((c("tidyverse", "survival", "gtsummary", "flextable", "officer", "naniar",
+                    "marginaleffects", "broom", "scales", "gt", "ComplexUpset", "patchwork")))
+
+library(tidyverse)      
+library(survival)
+library(gtsummary)
+library(flextable)
+library(officer)
+library(naniar)
+library(marginaleffects)
+library(broom)
+library(scales)
+library(gt)
+library(ComplexUpset)   
+library(patchwork)      
+
+
+# ---- IMPORT DATA ----------------------------------------------------------
+
+data <- read.csv("INSERT YOUR SOURCE FILE")
+str(data)
+
+
+# ---- RECODE CATEGORICAL VARIABLES -----------------------------------------
+
+# Coding legend:
+# status:       factor (alive or deceased)
+# hosp_adm:     0 = ER, 1 = ICU, 2 = CCU (/CICU/CTU/CSICU)
+# ca_yr:        2024 or 2023
+# sex:          0 = Female, 1 = Male
+# ind_consult:  0 = No, 1 = Yes
+# housing:      0 = Unstable, 1 = Stable, 2 = Unknown
+# hist_drug:    0 = No, 1 = Yes, "Unknown" = Unknown
+# drug_assoc:   0 = No, 1 = Yes
+# witnessed:    0 = Unwitnessed, 1 = Witnessed by Bystander, 2 = Witnessed by EMS
+# bys_cpr:      0 = No, 1 = Yes
+# bys_type:     0 = Layperson, 1 = Police, 2 = Healthcare, 3 = Other, 4 = Unknown
+# rearrest:     0 = No, 1 = Yes
+# hosp_site:    0 = Site 1, 1 = Site 2
+# gcs_icu:      0 = No, 1 = Yes
+# pat_outcome:  0 = Alive, 1 = Deceased, 2 = Unknown
+# cause_death:  0 = DNC, 1 = WLST, 2 = In the ER (pre-ICU)
+# cpc_score:    1 = CPC1, 2 = CPC2, 3 = CPC3, 4 = CPC4, 5 = Unknown
+# sdm_present:  0 = No, 1 = Yes
+# sdm_type:     0 = None, 1 = Committee, 2 = Representative, 3 = Advance
+#               Directive, 4 = Temporary (Known to patient), 5 = Temporary (PGT)
+
+data <- data %>%
+  mutate(
+    status = factor(status),
+    
+    hosp_adm = factor(hosp_adm,
+                      levels = c(0, 1, 2),
+                      labels = c("ER", "ICU", "CCU")),
+    
+    ca_yr = factor(ca_yr,
+                   levels = c(2023, 2024),
+                   labels = c("2023", "2024")),
+    
+    sex = factor(sex,
+                 levels = c(0, 1),
+                 labels = c("Female", "Male")),
+    
+    ind_consult = factor(ind_consult,
+                         levels = c(0, 1),
+                         labels = c("No", "Yes")),
+    
+    housing = factor(na_if(housing, 2),
+                     levels = c(0, 1),
+                     labels = c("Unstable", "Stable")),
+    
+    hist_drug = factor(na_if(hist_drug, "Unknown"),
+                       levels = c(0, 1),
+                       labels = c("No", "Yes")),
+    
+    drug_assoc = factor(drug_assoc,
+                        levels = c(0, 1),
+                        labels = c("No", "Yes")),
+    
+    witnessed = factor(na_if(witnessed, 3),
+                       levels = c(0, 1, 2),
+                       labels = c("Unwitnessed", "Bystander", "EMS/Fire")),
+    
+    bys_cpr = factor(bys_cpr,
+                     levels = c(0, 1),
+                     labels = c("No", "Yes")),
+    
+    bys_type = factor(bys_type,
+                      levels = c(0, 1, 2, 3, 4),
+                      labels = c("Layperson", "Police", "Healthcare", "Other", "Unknown")),
+    
+    rearrest = factor(rearrest,
+                      levels = c(0, 1),
+                      labels = c("No", "Yes")),
+    
+    hosp_site = factor(hosp_site,
+                       levels = c(0, 1),
+                       labels = c("Site 1", "Site 2")),
+    
+    gcs_icu = factor(gcs_icu,
+                     levels = c(0, 1),
+                     labels = c("No", "Yes")),
+    
+    pat_outcome = factor(na_if(pat_outcome, 2),
+                         levels = c(0, 1),
+                         labels = c("Alive", "Deceased")),
+    
+    cause_death = factor(cause_death,
+                         levels = c(0, 1, 2),
+                         labels = c("DNC", "WLST", "In ER")),
+    
+    cpc_score = factor(cpc_score,
+                       levels = c(1, 2, 3, 4, 5),
+                       labels = c("CPC1", "CPC2", "CPC3", "CPC4", "Unknown")),
+    
+    sdm_present = factor(sdm_present,
+                         levels = c(0, 1),
+                         labels = c("No", "Yes")),
+    
+    sdm_type = factor(sdm_type,
+                      levels = c(0, 1, 2, 3, 4, 5),
+                      labels = c("None", "Committee", "Representative", "Advance Directive",
+                                 "Temporary (Known to patient)", "Temporary (PGT)"))
+  )
+
+# ca_loc: 0-1 = Residential; 2-11 = Non-Residential
+data <- data %>%
+  mutate(ca_loc = factor(case_when(
+    ca_loc %in% c(0, 1)               ~ "Residential",
+    ca_loc %in% c(2:11)               ~ "Non-Residential",
+    TRUE                              ~ NA_character_
+  ), levels = c("Residential", "Non-Residential")))
+
+# initial_rhythm: 2,3,5 = Shockable; 0,1,4 = Non-shockable; 6,7,8 = Other
+data <- data %>%
+  mutate(initial_rhythm = factor(case_when(
+    initial_rhythm %in% c(2, 3, 5) ~ "Shockable",
+    initial_rhythm %in% c(0, 1, 4) ~ "Non-shockable",
+    initial_rhythm %in% c(6, 7, 8) ~ "Other",
+    TRUE                           ~ NA_character_
+  ), levels = c("Non-shockable", "Shockable", "Other")))
+
+
+# ---- DERIVE TIME-TO-EVENT VARIABLES ---------------------------------------
+
+data <- data %>%
+  mutate(
+    icu_datetime = as.POSIXct(paste(icu_adm_date, icu_adm_time),
+                              format = "%Y-%m-%d %H:%M:%S"),
+    outcome_datetime = as.POSIXct(paste(outcome_date, outcome_time),
+                                  format = "%Y-%m-%d %H:%M:%S"),
+    icu_to_outcome = as.numeric(difftime(outcome_datetime, icu_datetime, units = "hours"))
+  )
+
+data <- data %>%
+  mutate(
+    ca_datetime = as.POSIXct(paste(ca_date, ca_time),
+                             format = "%Y-%m-%d %H:%M:%S"),
+    dispatch_datetime = as.POSIXct(paste(ca_date, dispatch_time),
+                                   format = "%Y-%m-%d %H:%M:%S"),
+    rosc_datetime = as.POSIXct(paste(ca_date, first_rosc),
+                               format = "%Y-%m-%d %H:%M:%S")
+  )
+
+# Adjust for midnight crossover
+data <- data %>%
+  mutate(
+    dispatch_datetime = if_else(
+      !is.na(dispatch_datetime) & !is.na(ca_datetime) &
+        as.numeric(difftime(dispatch_datetime, ca_datetime, units = "hours")) > 12,
+      dispatch_datetime - 86400,
+      dispatch_datetime
+    ),
+    rosc_datetime = if_else(
+      !is.na(rosc_datetime) & !is.na(ca_datetime) &
+        as.numeric(difftime(ca_datetime, rosc_datetime, units = "hours")) > 12,
+      rosc_datetime + 86400,
+      rosc_datetime
+    )
+  )
+
+# Time intervals
+data <- data %>%
+  mutate(
+    time_to_rosc      = as.numeric(difftime(rosc_datetime, ca_datetime, units = "mins")),
+    dispatch_to_rosc   = as.numeric(difftime(rosc_datetime, dispatch_datetime, units = "mins")),
+    rosc_to_outcome    = as.numeric(difftime(outcome_datetime, rosc_datetime, units = "hours"))
+  )
+
+
+# ---- COHORT FILTERING -----------------------------------------------------
+
+# Remove excluded participants (not included hospital sites, age <19, missing identifiers)
+data <- data %>% filter(!is.na(status))
+
+# Status = deceased
+data_deceased <- data %>% filter(status == "Deceased")
+
+# Cause of death = WLST
+data_wlst <- data_deceased %>% filter(cause_death == "WLST")
+
+# Remove patients not admitted after ER
+data_main <- data_wlst %>% filter(hosp_adm != "ER")
+
+
+# ---- TIME FROM ROSC TO DEATH ----------------------------------------------
+
+# Exclude deaths >= 1500 hours after ROSC, then express in days
+data_plotrosc <- data_main %>%
+  filter(rosc_to_outcome < 1500) %>%
+  mutate(rosc_to_outcome_days = rosc_to_outcome / 24)
+
+# ---- DEATH >=72H POST-ROSC ------------------------------------------------
+
+data_plotrosc %>%
+  filter(!is.na(rosc_to_outcome_days)) %>%
+  mutate(died_after_72h = rosc_to_outcome_days >= 3) %>%
+  group_by(drug_assoc) %>%
+  summarise(
+    total = n(),
+    died_after_72h_n = sum(died_after_72h),
+    percent_after_72h = 100 * died_after_72h_n / total
+  )
+
+
+# ---- PROGNOSTIC TESTS USED IN WLST DECISION -------------------------------
+
+df_long <- data_plotrosc %>%
+  filter(drug_assoc %in% c("Yes", "No")) %>%
+  pivot_longer(cols = c(ct_done, eeg_done, ssep_done, mri_done),
+               names_to = "test", values_to = "done")
+
+# Counts
+df_summary <- df_long %>%
+  group_by(drug_assoc, test) %>%
+  summarise(n = sum(done == 1, na.rm = TRUE), .groups = "drop")
+df_summary
+
+# Proportions
+df_summary_prop <- df_long %>%
+  group_by(drug_assoc, test) %>%
+  summarise(prop = mean(done == 1, na.rm = TRUE), .groups = "drop")
+df_summary_prop
+
+
+# ---- NUMBER OF POOR-PROGNOSIS FINDINGS -----------------------------------
+
+findings <- c("pupil_72_pos", "myoclon_pos", "eeg_pos", "ct_pos", "mri_pos", "ssep_pos")
+
+data_plotrosc[findings] <- lapply(data_plotrosc[findings], function(x) {
+  x[is.na(x)] <- 0
+  as.numeric(x)
+})
+
+data_plotrosc$n_findings <- rowSums(data_plotrosc[findings])
+
+# Distribution of number of findings, by group
+plot_df_findings <- data_plotrosc %>%
+  group_by(drug_assoc, n_findings) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(drug_assoc) %>%
+  mutate(pct = n / sum(n))
+
+plot_df_findings$n_findings <- factor(plot_df_findings$n_findings, levels = 0:6)
+plot_df_findings
+
+# Proportion with >=2 findings
+summary_2plus <- data_plotrosc %>%
+  group_by(drug_assoc) %>%
+  summarise(pct_2plus = mean(n_findings >= 2, na.rm = TRUE))
+summary_2plus
+
+
+# ---- GUIDELINE ADHERENCE DEFINITION & CHI-SQUARE TEST --------------------
+# Adherent = >=2 poor-prognosis findings AND death >=3 days post-ROSC
+
+data_guidadh <- data_plotrosc %>%
+  mutate(guideline_adherent = if_else(
+    n_findings >= 2 & rosc_to_outcome_days >= 3, "Adherent", "Non-adherent"
+  ))
+
+data_guidadh %>%
+  count(guideline_adherent) %>%
+  mutate(percent = round(n / sum(n) * 100, 1))
+
+guidadh_tab <- table(data_guidadh$guideline_adherent, data_guidadh$drug_assoc)
+guidadh_tab
+prop.table(guidadh_tab, margin = 2) * 100
+
+# Chi-square (no Yates correction — all expected cell counts are > 5)
+chisq_test <- chisq.test(guidadh_tab, correct = FALSE)
+chisq_test
+chisq_test$expected
+any(chisq_test$expected < 5)  # should be FALSE
+
+prop_test <- prop.test(
+  x = c(guidadh_tab["Adherent", "Yes"], guidadh_tab["Adherent", "No"]),
+  n = c(sum(guidadh_tab[, "Yes"]), sum(guidadh_tab[, "No"])),
+  correct = FALSE
+)
+prop_test
+
+# ---- SENSITIVITY ANALYSIS: CT/MRI COMBINED AS ONE MODALITY ----------------
+# Adherent = >=2 poor-prognosis findings (CT/MRI counted as one) AND death >=3 days post-ROSC
+
+data_guidadh <- data_guidadh %>%
+  mutate(
+    neuroimg_pos = as.numeric(
+      coalesce(ct_pos, 0) == 1 | coalesce(mri_pos, 0) == 1
+    )
+  )
+
+findings_comb <- c(
+  "pupil_72_pos",
+  "myoclon_pos",
+  "eeg_pos",
+  "neuroimg_pos",
+  "ssep_pos"
+)
+
+data_guidadh$n_findcomb <- rowSums(data_guidadh[findings_comb], na.rm = TRUE)
+
+# Guideline adherent care (CT/MRI counted as one modality)
+data_guidadh_sens <- data_guidadh %>%
+  mutate(
+    guideline_adherent = if_else(
+      n_findcomb >= 2 & rosc_to_outcome_days >= 3,
+      "Adherent",
+      "Non-adherent"
+    )
+  )
+
+data_guidadh_sens %>%
+  count(guideline_adherent) %>%
+  mutate(percent = round(n / sum(n) * 100, 1))
+
+guidadh_sens_tab <- table(data_guidadh_sens$guideline_adherent, data_guidadh_sens$drug_assoc)
+guidadh_sens_tab
+
+prop.table(guidadh_sens_tab, margin = 2) * 100
+
+# Chi-square test
+chisq_test_sens <- chisq.test(guidadh_sens_tab, correct = FALSE)
+chisq_test_sens
+chisq_test_sens$expected
+any(chisq_test_sens$expected < 5)  # should be FALSE
+
+# Compare proportions of guideline-adherent patients
+prop_test_sens <- prop.test(
+  x = c(
+    guidadh_sens_tab["Adherent", "Yes"],
+    guidadh_sens_tab["Adherent", "No"]
+  ),
+  n = c(
+    sum(guidadh_sens_tab[, "Yes"]),
+    sum(guidadh_sens_tab[, "No"])
+  ),
+  correct = FALSE
+)
+prop_test_sens
+
+# ---- DEMOGRAPHICS TABLE (TABLE 1) ----------------------------------------
+
+table1 <- data_guidadh %>%
+  mutate(
+    drug_assoc = factor(drug_assoc, levels = c("No", "Yes"), labels = c("Non-DA", "DA")),
+    across(c(sex, initial_rhythm, ca_loc, witnessed, bys_cpr, sdm_type),
+           ~droplevels(as.factor(.x)))
+  ) %>%
+  select(drug_assoc, sex, age, dispatch_to_rosc, ca_loc, initial_rhythm, witnessed,
+         bys_cpr, sdm_type) %>%
+  tbl_summary(
+    by = drug_assoc,
+    statistic = list(age ~ "{median} ({p25}\u2013{p75})"),
+    digits = list(age ~ 1),
+    label = list(
+      sex ~ "Sex", age ~ "Age, years",
+      dispatch_to_rosc ~ "Time to ROSC, minutes",
+      initial_rhythm ~ "Initial rhythm", ca_loc ~ "Location of arrest",
+      witnessed ~ "Witnessed arrest", bys_cpr ~ "Bystander CPR", sdm_type ~ "SDM type"
+    )
+  ) %>%
+  add_overall() %>%
+  add_p() %>%
+  bold_labels()
+
+save_as_docx(as_flex_table(table1), path = "Table1.docx")
+
+# ---- LOGISTIC REGRESSION: GUIDELINE ADHERENCE ----------------------------
+# Final model set: unadjusted, minimally adjusted, fully adjusted
+
+data_guidadh <- data_guidadh %>%
+  mutate(
+    guideline_adherent = factor(guideline_adherent, levels = c("Non-adherent", "Adherent")),
+    drug_assoc = factor(drug_assoc, levels = c("No", "Yes")),
+    sex = factor(sex, levels = c("Female", "Male")),
+    ca_loc = factor(ca_loc, levels = c("Residential", "Non-Residential")),
+    initial_rhythm = factor(initial_rhythm),
+    witnessed = factor(witnessed),
+    bys_cpr = factor(bys_cpr),
+    hosp_site = factor(hosp_site),
+    ca_yr = factor(ca_yr)
+  )
+
+# Unadjusted (one model per variable)
+tbl_unadj <- tbl_uvregression(
+  data = data_guidadh, method = glm, y = guideline_adherent,
+  method.args = list(family = binomial), exponentiate = TRUE,
+  include = c(drug_assoc, age, sex, ca_loc, initial_rhythm, witnessed, bys_cpr,
+              ca_yr, hosp_site, dispatch_to_rosc)
+) %>%
+  bold_p() %>% bold_labels()
+
+# Minimally adjusted: age, sex, hosp_site, ca_yr
+model_minimal <- glm(
+  guideline_adherent ~ drug_assoc + age + sex + hosp_site + ca_yr,
+  data = data_guidadh, family = binomial
+)
+tbl_minimal <- tbl_regression(model_minimal, exponentiate = TRUE) %>%
+  bold_p() %>% bold_labels()
+
+# Fully adjusted
+model_full <- glm(
+  guideline_adherent ~ drug_assoc + age + sex + hosp_site + ca_yr + ca_loc +
+    initial_rhythm + dispatch_to_rosc + witnessed + bys_cpr,
+  data = data_guidadh, family = binomial
+)
+tbl_full <- tbl_regression(model_full, exponentiate = TRUE) %>%
+  bold_p() %>% bold_labels()
+
+final_table <- tbl_merge(
+  tbls = list(tbl_unadj, tbl_minimal, tbl_full),
+  tab_spanner = c("**Unadjusted OR**", "**Minimally Adjusted OR\u2020**", "**Fully Adjusted OR\u2021**")
+) %>%
+  modify_column_hide(columns = stat_n_1) %>%
+  modify_caption("**Factors Associated with Guideline Adherence**")
+
+final_table
+
+final_table %>%
+  as_flex_table() %>%
+  flextable::save_as_docx(path = "~/Downloads/odds_ratio_table.docx")
+
+
+# ---- PROGNOSTIC TESTS & FINDINGS ---------------------
+
+tbl_prognostic <- data_guidadh %>%
+  filter(drug_assoc %in% c("Yes", "No")) %>%
+  select(drug_assoc, ct_done, eeg_done, ssep_done, mri_done) %>%
+  tbl_summary(
+    by = drug_assoc,
+    statistic = all_dichotomous() ~ "{n} ({p}%)",
+    label = list(ct_done ~ "CT", eeg_done ~ "EEG", ssep_done ~ "SSEP", mri_done ~ "MRI")
+  ) %>%
+  add_p(test = all_dichotomous() ~ "fisher.test") %>%
+  bold_labels()
+
+tbl_prognostic
+
+tbl_poor_prognosis <- data_guidadh %>%
+  filter(drug_assoc %in% c("Yes", "No")) %>%
+  select(drug_assoc, pupil_72_pos, myoclon_pos, ct_pos, eeg_pos, mri_pos, ssep_pos) %>%
+  tbl_summary(
+    by = drug_assoc,
+    statistic = all_dichotomous() ~ "{n} ({p}%)",
+    digits = all_dichotomous() ~ c(0, 1),
+    label = list(
+      pupil_72_pos ~ "PLR (72h)", myoclon_pos ~ "Myoclonus", ct_pos ~ "CT",
+      eeg_pos ~ "EEG", mri_pos ~ "MRI", ssep_pos ~ "SSEP"
+    ),
+    missing = "no"
+  ) %>%
+  add_p(test = all_dichotomous() ~ "fisher.test", pvalue_fun = ~style_pvalue(.x, digits = 3)) %>%
+  modify_header(label ~ "**Poor Prognosis Finding**") %>%
+  bold_labels()
+
+tbl_poor_prognosis %>%
+  as_gt() %>%
+  gt::tab_header(title = "Patients with Poor Prognosis Findings")
+
+tbl_adherence <- data_guidadh %>%
+  mutate(
+    adherence_72h = rosc_to_outcome >= 72,
+    adherence_2findings = n_findings >= 2,
+    adherence_both = rosc_to_outcome >= 72 & n_findings >= 2
+  ) %>%
+  select(drug_assoc, adherence_72h, adherence_2findings, adherence_both) %>%
+  tbl_summary(
+    by = drug_assoc,
+    statistic = all_dichotomous() ~ "{n} ({p}%)",
+    digits = all_dichotomous() ~ c(0, 1),
+    label = list(
+      adherence_72h ~ "\u226572 hours", adherence_2findings ~ "\u22652 findings",
+      adherence_both ~ "\u226572 hours and \u22652 findings"
+    ),
+    missing = "no"
+  ) %>%
+  add_p(
+    test = all_dichotomous() ~ "chisq.test",
+    test.args = all_tests("chisq.test") ~ list(correct = FALSE),
+    pvalue_fun = ~style_pvalue(.x, digits = 3)
+  ) %>%
+  bold_labels()
+
+tbl_adherence
+
+
+# ---- TIME FROM ROSC TO DEATH (<=21 DAYS): SUMMARY & WILCOXON -------------
+
+data_filtered <- data_guidadh %>% filter(rosc_to_outcome_days <= 21)
+
+summary_stats <- data_filtered |>
+  group_by(drug_assoc) |>
+  summarise(
+    n = n(),
+    median = median(rosc_to_outcome_days, na.rm = TRUE),
+    q25 = quantile(rosc_to_outcome_days, 0.25, na.rm = TRUE),
+    q75 = quantile(rosc_to_outcome_days, 0.75, na.rm = TRUE),
+    iqr = IQR(rosc_to_outcome_days, na.rm = TRUE)
+  ) |>
+  mutate(median_iqr = paste0(median, " (", q25, "-", q75, ")"))
+summary_stats
+
+
+# ---- UPSET PLOTS: TEST COMBINATIONS BY DRUG ASSOCIATION ------------------
+
+upset_sets <- c("mri_done", "ct_done", "eeg_done", "ssep_done")
+upset_labels <- c(mri_done = "MRI", ct_done = "CT", eeg_done = "EEG", ssep_done = "SSEP")
+
+p_upset_yes <- upset(
+  data_guidadh |> filter(drug_assoc == "Yes"),
+  upset_sets,
+  labeller = as_labeller(upset_labels),
+  base_annotations = list(
+    "Patients" = intersection_size(counts = TRUE) + ylab("Number of patients") +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  ),
+  set_sizes = upset_set_size() + ylab("Total")
+) +
+  labs(x = "DA-OHCA")
+
+p_upset_no <- upset(
+  data_guidadh |> filter(drug_assoc == "No"),
+  upset_sets,
+  labeller = as_labeller(upset_labels),
+  base_annotations = list(
+    "Patients" = intersection_size(counts = TRUE) + ylab("Number of patients") +
+      theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  ),
+  set_sizes = upset_set_size() + ylab("Total")
+) +
+  labs(x = "Non-DA-OHCA")
+
+p_upset_yes | p_upset_no
+
+
+# ---- MARGINAL PROBABILITIES OF GUIDELINE ADHERENCE -----------------------
+
+get_marginal_table <- function(model, model_name) {
+  probs <- avg_predictions(model, variables = "drug_assoc")
+  diff  <- avg_comparisons(model, variables = "drug_assoc")
+  
+  OR_info <- tidy(model, conf.int = TRUE, exponentiate = TRUE) %>%
+    filter(term == "drug_assocYes")
+  
+  tibble(
+    Model = model_name,
+    Non_DA = probs$estimate[probs$drug_assoc == "No"],
+    DA = probs$estimate[probs$drug_assoc == "Yes"],
+    Difference = diff$estimate,
+    Lower_CI = diff$conf.low,
+    Upper_CI = diff$conf.high,
+    OR = OR_info$estimate,
+    OR_lower = OR_info$conf.low,
+    OR_upper = OR_info$conf.high,
+    p_value = OR_info$p.value
+  )
+}
+
+model_unadj <- glm(guideline_adherent ~ drug_assoc, family = binomial, data = data_guidadh)
+
+marginal_results <- bind_rows(
+  get_marginal_table(model_unadj, "Unadjusted"),
+  get_marginal_table(model_minimal, "Minimal"),
+  get_marginal_table(model_full, "Full")
+)
+
+marginal_results_formatted <- marginal_results %>%
+  mutate(
+    Non_DA = scales::percent(Non_DA, accuracy = 0.1),
+    DA = scales::percent(DA, accuracy = 0.1),
+    Difference = scales::percent(Difference, accuracy = 0.1),
+    CI = paste0(scales::percent(Lower_CI, accuracy = 0.1), " to ",
+                scales::percent(Upper_CI, accuracy = 0.1)),
+    `OR (95% CI)` = paste0(round(OR, 2), " (", round(OR_lower, 2), ", ", round(OR_upper, 2), ")"),
+    `p-value` = ifelse(p_value < 0.001, "<0.001", sprintf("%.3f", p_value))
+  ) %>%
+  select(Model, Non_DA, DA, Difference, CI, `OR (95% CI)`, `p-value`)
+
+marginal_results_formatted
+
+ft_marginal <- flextable(marginal_results_formatted) %>%
+  autofit() %>%
+  set_caption(caption = paste(
+    "Standardized marginal probabilities of guideline adherence according to",
+    "drug-associated cardiac arrest status."
+  ))
+
+doc <- read_docx() %>%
+  body_add_par("Table X. Standardized Marginal Probabilities", style = "heading 1") %>%
+  body_add_flextable(ft_marginal)
+
+print(doc, target = "marginal_probabilities.docx")
